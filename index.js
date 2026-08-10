@@ -132,8 +132,7 @@ app.post('/api/orders/:id/create-payment', async (req, res) => {
         amount: amountHalalas,
         currency: 'SAR',
         description: `طلب مرايا #${order.id}`,
-       success_url: `http://localhost:3001/payment-result?order_id=${order.id}`,
-      }),
+success_url: `https://maraya-frontend.vercel.app/payment-result?order_id=${order.id}`,      }),
     });
 
     const invoice = await response.json();
