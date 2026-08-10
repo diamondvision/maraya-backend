@@ -1,0 +1,221 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// الاتصال بقاعدة بيانات Supabase
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
+
+app.get('/', (req, res) => {
+  res.send('Hello Maraya! السيرفر شغال 🎉');
+});
+
+// API يجيب المنيو (categories + products) فعليًا من قاعدة البيانات
+app.get('/api/menu', async (req, res) => {
+  const { data: categories, error: catError } = await supabase
+    .from('categories')
+    .select('*')
+    .order('display_order');
+
+  const { data: products, error: prodError } = await supabase
+    .from('products')
+    .select('*')
+    .eq('is_available', true);
+
+  if (catError || prodError) {
+    return res.status(500).json({ error: catError?.message || prodError?.message });
+  }
+
+  res.json({ categories, products });
+});
+// إنشاء طلب جديد
+app.post('/api/orders', async (req, res) => {
+  const { customer_name, customer_phone, table_number, items } = req.body;
+
+  if (!customer_phone || !items || items.length === 0) {
+    return res.status(400).json({ error: 'بيانات الطلب ناقصة' });
+  }
+
+  try {
+    let { data: customer } = await supabase
+      .from('customers')
+      .select('*')
+      .eq('phone', customer_phone)
+      .maybeSingle();
+
+    if (!customer) {
+      const { data: newCustomer, error: createError } = await supabase
+        .from('customers')
+        .insert({ phone: customer_phone, name: customer_name })
+        .select()
+        .single();
+      if (createError) throw createError;
+      customer = newCustomer;
+    }
+
+    let table_id = null;
+    if (table_number) {
+      const { data: table } = await supabase
+        .from('tables')
+        .select('id')
+        .eq('table_number', table_number)
+        .maybeSingle();
+      if (table) table_id = table.id;
+    }
+
+    const productIds = items.map((i) => i.product_id);
+    const { data: products, error: productsError } = await supabase
+      .from('products')
+      .select('id, base_price')
+      .in('id', productIds);
+    if (productsError) throw productsError;
+
+    const priceMap = Object.fromEntries(products.map((p) => [p.id, Number(p.base_price)]));
+    const total_price = items.reduce(
+      (sum, item) => sum + (priceMap[item.product_id] || 0) * item.quantity,
+      0
+    );
+
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .insert({
+        customer_id: customer.id,
+        table_id,
+        order_type: table_id ? 'dine_in_qr' : 'counter',
+        status: 'pending',
+        payment_status: 'unpaid',
+        total_price,
+      })
+      .select()
+      .single();
+    if (orderError) throw orderError;
+
+    const orderItems = items.map((item) => ({
+      order_id: order.id,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      unit_price: priceMap[item.product_id] || 0,
+    }));
+
+    const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
+    if (itemsError) throw itemsError;
+
+    res.json({ success: true, order_id: order.id, total_price });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// إنشاء فاتورة دفع أونلاين لطلب موجود
+app.post('/api/orders/:id/create-payment', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: order, error } = await supabase.from('orders').select('*').eq('id', id).single();
+    if (error || !order) return res.status(404).json({ error: 'الطلب غير موجود' });
+
+    const amountHalalas = Math.round(Number(order.total_price) * 100);
+
+    const response = await fetch('https://api.moyasar.com/v1/invoices', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Basic ' + Buffer.from(process.env.MOYASAR_SECRET_KEY + ':').toString('base64'),
+      },
+      body: JSON.stringify({
+        amount: amountHalalas,
+        currency: 'SAR',
+        description: `طلب مرايا #${order.id}`,
+       success_url: `http://localhost:3001/payment-result?order_id=${order.id}`,
+      }),
+    });
+
+    const invoice = await response.json();
+    if (!response.ok) throw new Error(invoice.message || 'فشل إنشاء فاتورة الدفع');
+
+    res.json({ url: invoice.url, invoice_id: invoice.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// تأكيد حالة الدفع بعد رجوع العميل من Moyasar
+app.post('/api/orders/:id/confirm-payment', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { payment_id } = req.body;
+
+    const response = await fetch(`https://api.moyasar.com/v1/payments/${payment_id}`, {
+      headers: {
+        Authorization: 'Basic ' + Buffer.from(process.env.MOYASAR_SECRET_KEY + ':').toString('base64'),
+      },
+    });
+    const payment = await response.json();
+
+    if (payment.status === 'paid') {
+      await supabase.from('orders').update({ payment_status: 'paid' }).eq('id', id);
+      return res.json({ success: true, status: 'paid' });
+    }
+
+    res.json({ success: false, status: payment.status });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/debug-key', (req, res) => {
+  const key = process.env.MOYASAR_SECRET_KEY || '';
+  res.json({ length: key.length, start: key.slice(0, 12), end: key.slice(-6) });
+});
+// جلب الطلبات النشطة للوحة التحكم
+app.get('/api/dashboard/orders', async (req, res) => {
+  try {
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select(`
+        id, status, payment_status, total_price, order_type, created_at,
+        table_id, customer_id,
+        tables(table_number),
+        customers(name, phone),
+        order_items(id, quantity, unit_price, products(name))
+      `)
+      .neq('status', 'completed')
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    res.json({ orders });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// تحديث حالة الطلب
+app.patch('/api/orders/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const validStatuses = ['pending', 'preparing', 'ready', 'completed', 'cancelled'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'حالة غير صحيحة' });
+    }
+    const { error } = await supabase.from('orders').update({ status }).eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
