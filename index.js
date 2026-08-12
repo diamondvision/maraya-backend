@@ -214,6 +214,22 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// جلب حالة طلب معين (للعميل)
+app.get('/api/orders/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: order, error } = await supabase
+      .from('orders')
+      .select('id, status, payment_status, total_price')
+      .eq('id', id)
+      .single();
+    if (error || !order) return res.status(404).json({ error: 'الطلب غير موجود' });
+    res.json({ order });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
