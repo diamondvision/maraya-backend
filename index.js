@@ -35,9 +35,16 @@ app.get('/api/menu', async (req, res) => {
 
   res.json({ categories, products });
 });
+
+function isRiyadhWeekend() {
+  const riyadhNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Riyadh' }));
+  const day = riyadhNow.getDay(); // 0=Sun ... 4=Thu, 5=Fri, 6=Sat
+  return [4, 5, 6].includes(day);
+}
+
 // إنشاء طلب جديد
 app.post('/api/orders', async (req, res) => {
-  const { customer_name, customer_phone, table_number, items } = req.body;
+  const { customer_name, customer_phone, table_number, items, offer_pair_ids } = req.body;
 
   if (!customer_phone || !items || items.length === 0) {
     return res.status(400).json({ error: 'بيانات الطلب ناقصة' });
@@ -78,10 +85,31 @@ app.post('/api/orders', async (req, res) => {
     if (productsError) throw productsError;
 
     const priceMap = Object.fromEntries(products.map((p) => [p.id, Number(p.base_price)]));
-    const total_price = items.reduce(
+    let total_price = items.reduce(
       (sum, item) => sum + (priceMap[item.product_id] || 0) * item.quantity,
       0
     );
+
+    let notes = null;
+
+    // تطبيق عرض "اشتري مشروب واحصل على الآخر بسعر الأرخص مجانًا" - عطلة نهاية الأسبوع فقط
+    if (
+      Array.isArray(offer_pair_ids) &&
+      offer_pair_ids.length === 2 &&
+      offer_pair_ids[0] !== offer_pair_ids[1] &&
+      isRiyadhWeekend()
+    ) {
+      const [idA, idB] = offer_pair_ids;
+      const hasA = items.some((i) => i.product_id === idA);
+      const hasB = items.some((i) => i.product_id === idB);
+      if (hasA && hasB) {
+        const priceA = priceMap[idA] || 0;
+        const priceB = priceMap[idB] || 0;
+        const discount = Math.min(priceA, priceB);
+        total_price -= discount;
+        notes = 'عرض نهاية الأسبوع: مشروب مجاني (خصم ' + discount + ' ريال)';
+      }
+    }
 
     const { data: order, error: orderError } = await supabase
       .from('orders')
@@ -92,6 +120,7 @@ app.post('/api/orders', async (req, res) => {
         status: 'pending',
         payment_status: 'unpaid',
         total_price,
+        notes,
       })
       .select()
       .single();
@@ -113,6 +142,7 @@ app.post('/api/orders', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // إنشاء فاتورة دفع أونلاين لطلب موجود
 app.post('/api/orders/:id/create-payment', async (req, res) => {
   try {
@@ -132,7 +162,8 @@ app.post('/api/orders/:id/create-payment', async (req, res) => {
         amount: amountHalalas,
         currency: 'SAR',
         description: `طلب مرايا #${order.id}`,
-success_url: `https://maraya-frontend.vercel.app/payment-result?order_id=${order.id}`,      }),
+        success_url: `https://maraya-frontend.vercel.app/payment-result?order_id=${order.id}`,
+      }),
     });
 
     const invoice = await response.json();
@@ -169,10 +200,12 @@ app.post('/api/orders/:id/confirm-payment', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.get('/api/debug-key', (req, res) => {
   const key = process.env.MOYASAR_SECRET_KEY || '';
   res.json({ length: key.length, start: key.slice(0, 12), end: key.slice(-6) });
 });
+
 // جلب الطلبات النشطة للوحة التحكم
 app.get('/api/dashboard/orders', async (req, res) => {
   try {
@@ -214,6 +247,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // جلب حالة طلب معين (للعميل)
 app.get('/api/orders/:id', async (req, res) => {
   try {
@@ -230,6 +264,7 @@ app.get('/api/orders/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
