@@ -37,9 +37,7 @@ app.get('/api/menu', async (req, res) => {
 });
 
 function isRiyadhWeekend() {
-  const riyadhNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Riyadh' }));
-  const day = riyadhNow.getDay(); // 0=Sun ... 4=Thu, 5=Fri, 6=Sat
-  return [4, 5, 6].includes(day);
+  return true; // تجربة مؤقتة - رجّعها زي ما كانت بعد الاختبار
 }
 
 // إنشاء طلب جديد
