@@ -290,6 +290,68 @@ app.get('/api/customers/visits', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// لعبة خربش واكسب - مرة كل 3 أيام لكل عميل
+app.post('/api/customers/scratch', async (req, res) => {
+  const { phone, name } = req.body;
+  if (!phone) return res.status(400).json({ error: 'رقم الجوال مطلوب' });
+  try {
+    let { data: customer } = await supabase.from('customers').select('*').eq('phone', phone).maybeSingle();
+    if (!customer) {
+      const { data: newCustomer, error } = await supabase
+        .from('customers')
+        .insert({ phone, name })
+        .select()
+        .single();
+      if (error) throw error;
+      customer = newCustomer;
+    }
+
+    const { data: lastAttempt } = await supabase
+      .from('scratch_attempts')
+      .select('*')
+      .eq('customer_id', customer.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
+    if (lastAttempt && Date.now() - new Date(lastAttempt.created_at).getTime() < THREE_DAYS) {
+      return res.json({
+        eligible: false,
+        result: { won: lastAttempt.won, code: lastAttempt.code, discount_percent: lastAttempt.discount_percent },
+        created_at: lastAttempt.created_at,
+      });
+    }
+
+    const won = Math.random() < 0.5;
+    let code = null;
+    if (won) {
+      code = generateRewardCode();
+      await supabase.from('loyalty_rewards').insert({
+        customer_id: customer.id,
+        code,
+        reward_type: 'discount_percent',
+        discount_percent: 10,
+      });
+    }
+
+    const { data: attempt, error: attemptError } = await supabase
+      .from('scratch_attempts')
+      .insert({ customer_id: customer.id, won, code, discount_percent: won ? 10 : null })
+      .select()
+      .single();
+    if (attemptError) throw attemptError;
+
+    res.json({
+      eligible: true,
+      result: { won, code, discount_percent: won ? 10 : null },
+      created_at: attempt.created_at,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
