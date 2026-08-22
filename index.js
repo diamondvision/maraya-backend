@@ -264,7 +264,32 @@ app.get('/api/orders/:id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// جلب عدد زيارات العميل المدفوعة (لعرض تقدم برنامج الولاء)
+app.get('/api/customers/visits', async (req, res) => {
+  try {
+    const { phone } = req.query;
+    if (!phone) return res.status(400).json({ error: 'رقم الجوال مطلوب' });
 
+    const { data: customer } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('phone', phone)
+      .maybeSingle();
+
+    if (!customer) return res.json({ visits: 0 });
+
+    const { count } = await supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('customer_id', customer.id)
+      .eq('payment_status', 'paid');
+
+    res.json({ visits: count || 0 });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
